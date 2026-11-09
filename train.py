@@ -10,6 +10,7 @@
 #
 
 import os
+import time
 import torch
 from random import randint
 from utils.loss_utils import l1_loss, ssim
@@ -21,6 +22,7 @@ import uuid
 from tqdm import tqdm
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
+from utils.prune_score_logger import PruneScoreLogger, collect_metadata
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_FOUND = True
@@ -44,7 +46,7 @@ def score_func(view, gaussians, pipeline, background, scores):
     scores += img_scores.grad
 
 
-def prune(scene, gaussians, pipe, background, prune_ratio):
+def prune(scene, gaussians, pipe, background, prune_ratio, *, iteration=None, stage=None, score_logger=None):
 
     iter_start = torch.cuda.Event(enable_timing = True)
     iter_end = torch.cuda.Event(enable_timing = True)
@@ -63,15 +65,33 @@ def prune(scene, gaussians, pipe, background, prune_ratio):
             pbar.update(1)
         pbar.close()
 
+    logging_active = score_logger is not None and score_logger.enabled
+    if logging_active:
+        n_before = gaussians.get_xyz.shape[0]
     gaussians.prune_gaussians(prune_ratio, scores)
 
     iter_end.record()
+    if logging_active:
+        n_after = gaussians.get_xyz.shape[0]
 
     # Track peak memory usage (in bytes) and convert to MB
     peak_memory_allocated = torch.cuda.max_memory_allocated() / (1024 ** 2)
     peak_memory_reserved = torch.cuda.max_memory_reserved() / (1024 ** 2)
+    if logging_active:
+        iter_end.synchronize()
     time_ms = iter_start.elapsed_time(iter_end)
     time_min = time_ms / 60_000
+
+    if logging_active:
+        score_shape, score_dtype = list(scores.shape), str(scores.dtype)
+        copy_start = time.perf_counter()
+        score_array = scores.detach().cpu().numpy().reshape(-1)
+        copy_ms = (time.perf_counter() - copy_start) * 1000
+        context = dict(iteration=iteration, stage=stage, train_view_count=len(scene.getTrainCameras()),
+                       score_shape=score_shape, score_dtype=score_dtype, n_before=n_before, n_after=n_after,
+                       requested_ratio=prune_ratio, prune_cuda_time_ms=time_ms,
+                       prune_peak_allocated_mib=peak_memory_allocated, prune_peak_reserved_mib=peak_memory_reserved)
+        score_logger.record(score_array, context, copy_ms)
 
     return {
         "peak_memory_allocated" : peak_memory_allocated,
@@ -88,6 +108,12 @@ def training(dataset, opt, pipe, testing_iterations, visualize_iterations, savin
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
+
+    score_logger = None
+    if opt.log_prune_scores:
+        metadata = collect_metadata(dataset, opt, pipe, checkpoint, first_iter,
+                                    scene.getTrainCameras(), os.path.dirname(os.path.abspath(__file__)), torch)
+        score_logger = PruneScoreLogger.create(scene.model_path, metadata)
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -182,7 +208,7 @@ def training(dataset, opt, pipe, testing_iterations, visualize_iterations, savin
 
                     prune_pkg = prune(
                         scene, gaussians, pipe, background,
-                        opt.densify_prune_ratio)
+                        opt.densify_prune_ratio, iteration=iteration, stage="soft", score_logger=score_logger)
                     prune_time_min += prune_pkg['time_min']
                     prune_peak_memory_allocated = prune_pkg['peak_memory_allocated']
                     prune_peak_memory_reserved = prune_pkg['peak_memory_reserved']
@@ -207,7 +233,7 @@ def training(dataset, opt, pipe, testing_iterations, visualize_iterations, savin
 
                 prune_pkg = prune(
                     scene, gaussians, pipe, background,
-                    opt.after_densify_prune_ratio)
+                    opt.after_densify_prune_ratio, iteration=iteration, stage="hard", score_logger=score_logger)
                 prune_time_min += prune_pkg['time_min']
                 prune_peak_memory_allocated = prune_pkg['peak_memory_allocated']
                 prune_peak_memory_reserved = prune_pkg['peak_memory_reserved']
