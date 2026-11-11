@@ -95,6 +95,7 @@ class OptimizationParams(ParamGroup):
         self.after_densify_prune_ratio = 0.30
         self.hard_prune_ratios = ""
         self.log_prune_scores = False
+        self.seed = 0
 
         super().__init__(parser, "Optimization Parameters")
 
