@@ -23,6 +23,7 @@ from tqdm import tqdm
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
 from utils.prune_score_logger import PruneScoreLogger, collect_metadata
+from utils.soft_prune_schedule import build_soft_prune_schedule
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_FOUND = True
@@ -100,6 +101,14 @@ def prune(scene, gaussians, pipe, background, prune_ratio, *, iteration=None, st
     }
 
 def training(dataset, opt, pipe, testing_iterations, visualize_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
+    soft_pruning_config = build_soft_prune_schedule(opt)
+    soft_ratio_by_iteration = {
+        item["iteration"]: item["ratio"]
+        for item in soft_pruning_config["schedule"]
+    }
+    print("Soft pruning plan: mode={}, schedule={}, retention product without densification={}".format(
+        soft_pruning_config["mode"], soft_pruning_config["schedule"],
+        soft_pruning_config["retention_product_without_densification"]))
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree)
@@ -113,6 +122,7 @@ def training(dataset, opt, pipe, testing_iterations, visualize_iterations, savin
     if opt.log_prune_scores:
         metadata = collect_metadata(dataset, opt, pipe, checkpoint, first_iter,
                                     scene.getTrainCameras(), os.path.dirname(os.path.abspath(__file__)), torch)
+        metadata["soft_pruning"] = soft_pruning_config
         score_logger = PruneScoreLogger.create(scene.model_path, metadata)
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
@@ -208,7 +218,7 @@ def training(dataset, opt, pipe, testing_iterations, visualize_iterations, savin
 
                     prune_pkg = prune(
                         scene, gaussians, pipe, background,
-                        opt.densify_prune_ratio, iteration=iteration, stage="soft", score_logger=score_logger)
+                        soft_ratio_by_iteration[iteration], iteration=iteration, stage="soft", score_logger=score_logger)
                     prune_time_min += prune_pkg['time_min']
                     prune_peak_memory_allocated = prune_pkg['peak_memory_allocated']
                     prune_peak_memory_reserved = prune_pkg['peak_memory_reserved']
