@@ -92,7 +92,6 @@ class OptimizationParams(ParamGroup):
         self.prune_until_iter = 30_000
         self.prune_interval = 3000
         self.densify_prune_ratio = 0.80
-        self.soft_prune_ratios = ""
         self.after_densify_prune_ratio = 0.30
         self.log_prune_scores = False
 
