@@ -94,6 +94,11 @@ class OptimizationParams(ParamGroup):
         self.densify_prune_ratio = 0.80
         self.after_densify_prune_ratio = 0.30
         self.log_prune_scores = False
+        self.adaptive_hard_pruning = False
+        self.adaptive_beta = 0.95
+        self.adaptive_check_interval = 500
+        self.adaptive_max_wait = 2000
+        self.adaptive_target_fraction = 0.1
 
         super().__init__(parser, "Optimization Parameters")
 

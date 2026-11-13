@@ -23,6 +23,7 @@ from tqdm import tqdm
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
 from utils.prune_score_logger import PruneScoreLogger, collect_metadata
+from utils.adaptive_pruning import AdaptivePruning
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_FOUND = True
@@ -106,8 +107,16 @@ def training(dataset, opt, pipe, testing_iterations, visualize_iterations, savin
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
     if checkpoint:
-        (model_params, first_iter) = torch.load(checkpoint)
+        checkpoint_data = torch.load(checkpoint)
+        model_params, first_iter = checkpoint_data[:2]
         gaussians.restore(model_params, opt)
+
+    adaptive = AdaptivePruning(opt) if opt.adaptive_hard_pruning else None
+    if adaptive and checkpoint:
+        if len(checkpoint_data) >= 3 and checkpoint_data[2] is not None:
+            adaptive.load_state_dict(checkpoint_data[2])
+        elif first_iter >= max(opt.densify_until_iter, opt.prune_from_iter):
+            raise ValueError("Adaptive pruning cannot resume this checkpoint: scheduler state is missing")
 
     score_logger = None
     if opt.log_prune_scores:
@@ -221,23 +230,41 @@ def training(dataset, opt, pipe, testing_iterations, visualize_iterations, savin
                 gaussians.optimizer.step()
                 gaussians.optimizer.zero_grad(set_to_none = True)
 
-            if (iteration in checkpoint_iterations):
+            if (iteration in checkpoint_iterations) and not adaptive:
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
 
             # --- Hard Pruning ---
-            if (iteration >= opt.densify_until_iter) and \
-                (iteration >= opt.prune_from_iter) and \
-                (iteration < opt.prune_until_iter) and \
-                (iteration % opt.prune_interval == 0):
-
-                prune_pkg = prune(
-                    scene, gaussians, pipe, background,
-                    opt.after_densify_prune_ratio, iteration=iteration, stage="hard", score_logger=score_logger)
+            if adaptive:
+                if adaptive.should_check(iteration, gaussians.get_xyz.shape[0]):
+                    cameras = scene.getTrainCameras()
+                    current_loss = sum(l1_loss(render(view, gaussians, pipe, background)["render"],
+                                               view.original_image.cuda()).item()
+                                       for view in cameras) / len(cameras)
+                    count = gaussians.get_xyz.shape[0]
+                    ratio = adaptive.decide(iteration, count, current_loss)
+                    print("\n[ITER {}] adaptive L1={:.6f}, target={}, ratio={:.6f}".format(
+                        iteration, current_loss, adaptive.target, ratio))
+                    if ratio > 0:
+                        prune_pkg = prune(scene, gaussians, pipe, background, ratio,
+                                          iteration=iteration, stage="hard_adaptive", score_logger=score_logger)
+                        adaptive.record_prune(iteration, current_loss)
+                        prune_time_min += prune_pkg['time_min']
+                        prune_peak_memory_allocated = prune_pkg['peak_memory_allocated']
+                        prune_peak_memory_reserved = prune_pkg['peak_memory_reserved']
+            elif (iteration >= opt.densify_until_iter and iteration >= opt.prune_from_iter
+                  and iteration < opt.prune_until_iter and iteration % opt.prune_interval == 0):
+                prune_pkg = prune(scene, gaussians, pipe, background,
+                                  opt.after_densify_prune_ratio, iteration=iteration,
+                                  stage="hard", score_logger=score_logger)
                 prune_time_min += prune_pkg['time_min']
                 prune_peak_memory_allocated = prune_pkg['peak_memory_allocated']
                 prune_peak_memory_reserved = prune_pkg['peak_memory_reserved']
 
+            if adaptive and iteration in checkpoint_iterations:
+                print("\n[ITER {}] Saving Checkpoint".format(iteration))
+                torch.save((gaussians.capture(), iteration, adaptive.state_dict()),
+                           scene.model_path + "/chkpnt" + str(iteration) + ".pth")
 
             # Log and save
             iter_time = iter_start.elapsed_time(iter_end)
