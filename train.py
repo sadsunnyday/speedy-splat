@@ -24,6 +24,7 @@ from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
 from utils.prune_score_logger import PruneScoreLogger, collect_metadata
 from utils.adaptive_pruning import AdaptivePruning
+from utils.spectral_pruning import spectral_detail_weight, fuse_scores
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_FOUND = True
@@ -32,7 +33,7 @@ except ImportError:
 
 from compute_scene_metrics import scene_metrics
 
-def score_func(view, gaussians, pipeline, background, scores):
+def score_func(view, gaussians, pipeline, background, scores, spectral_scores=None, gamma=1.0):
 
     img_scores = torch.zeros_like(scores)
     img_scores.requires_grad = True
@@ -42,12 +43,16 @@ def score_func(view, gaussians, pipeline, background, scores):
 
     # Backward computes and stores grad squared values
     # in img_scores's grad
-    image.sum().backward()
-
+    image.sum().backward(retain_graph=spectral_scores is not None)
     scores += img_scores.grad
+    if spectral_scores is not None:
+        img_scores.grad = None
+        weight = spectral_detail_weight(image.detach(), gamma)
+        (image * weight.sqrt().unsqueeze(0)).sum().backward()
+        spectral_scores += img_scores.grad
 
 
-def prune(scene, gaussians, pipe, background, prune_ratio, *, iteration=None, stage=None, score_logger=None):
+def prune(scene, gaussians, pipe, background, prune_ratio, *, iteration=None, stage=None, score_logger=None, spectral_opt=None):
 
     iter_start = torch.cuda.Event(enable_timing = True)
     iter_end = torch.cuda.Event(enable_timing = True)
@@ -60,11 +65,14 @@ def prune(scene, gaussians, pipe, background, prune_ratio, *, iteration=None, st
             total=len(scene.getTrainCameras()),
             desc='Computing Pruning Scores')
         scores = torch.zeros_like(gaussians.get_opacity)
+        spectral_scores = torch.zeros_like(scores) if spectral_opt else None
         for view in scene.getTrainCameras():
             score_func(view, gaussians, pipe, background,
-                scores)
+                scores, spectral_scores, spectral_opt.spectral_gamma if spectral_opt else 1.0)
             pbar.update(1)
         pbar.close()
+        if spectral_opt:
+            scores = fuse_scores(scores, spectral_scores, spectral_opt.spectral_weight)
 
     logging_active = score_logger is not None and score_logger.enabled
     if logging_active:
@@ -102,6 +110,8 @@ def prune(scene, gaussians, pipe, background, prune_ratio, *, iteration=None, st
 
 def training(dataset, opt, pipe, testing_iterations, visualize_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
     first_iter = 0
+    if opt.spectral_pruning and (not 0 < opt.spectral_gamma or not 0 <= opt.spectral_weight):
+        raise ValueError("spectral_gamma must be positive and spectral_weight nonnegative")
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree)
     scene = Scene(dataset, gaussians)
@@ -247,7 +257,8 @@ def training(dataset, opt, pipe, testing_iterations, visualize_iterations, savin
                         iteration, current_loss, adaptive.target, ratio))
                     if ratio > 0:
                         prune_pkg = prune(scene, gaussians, pipe, background, ratio,
-                                          iteration=iteration, stage="hard_adaptive", score_logger=score_logger)
+                                          iteration=iteration, stage="hard_adaptive", score_logger=score_logger,
+                                          spectral_opt=opt if opt.spectral_pruning else None)
                         adaptive.record_prune(iteration, current_loss)
                         prune_time_min += prune_pkg['time_min']
                         prune_peak_memory_allocated = prune_pkg['peak_memory_allocated']
@@ -256,7 +267,8 @@ def training(dataset, opt, pipe, testing_iterations, visualize_iterations, savin
                   and iteration < opt.prune_until_iter and iteration % opt.prune_interval == 0):
                 prune_pkg = prune(scene, gaussians, pipe, background,
                                   opt.after_densify_prune_ratio, iteration=iteration,
-                                  stage="hard", score_logger=score_logger)
+                                  stage="hard", score_logger=score_logger,
+                                  spectral_opt=opt if opt.spectral_pruning else None)
                 prune_time_min += prune_pkg['time_min']
                 prune_peak_memory_allocated = prune_pkg['peak_memory_allocated']
                 prune_peak_memory_reserved = prune_pkg['peak_memory_reserved']
