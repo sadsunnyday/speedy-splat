@@ -95,9 +95,6 @@ class OptimizationParams(ParamGroup):
         self.densify_prune_ratio = 0.80
         self.after_densify_prune_ratio = 0.30
         self.log_prune_scores = False
-        self.spectral_pruning = False
-        self.spectral_gamma = 1.0
-        self.spectral_weight = 1.0
         self.adaptive_hard_pruning = False
         self.adaptive_trigger_mode = "legacy"
         self.adaptive_beta = 0.95
