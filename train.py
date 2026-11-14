@@ -11,6 +11,8 @@
 
 import os
 import time
+import json
+import math
 import torch
 from random import randint
 from utils.loss_utils import l1_loss, ssim
@@ -108,6 +110,29 @@ def prune(scene, gaussians, pipe, background, prune_ratio, *, iteration=None, st
         "time_min" : time_min
     }
 
+def training_view_l1(scene, gaussians, pipe, background):
+    cameras = scene.getTrainCameras()
+    if not cameras:
+        raise ValueError("Cannot measure L1: no training cameras")
+    torch.cuda.synchronize()
+    start = time.perf_counter()
+    with torch.no_grad():
+        losses = [l1_loss(render(view, gaussians, pipe, background)["render"],
+                          view.original_image.cuda()).item() for view in cameras]
+    torch.cuda.synchronize()
+    elapsed = time.perf_counter() - start
+    if not all(math.isfinite(loss) for loss in losses):
+        raise ValueError("Cannot measure L1: non-finite training-view loss")
+    return sum(losses) / len(losses), elapsed
+
+
+def log_adaptive_event(path, event):
+    line = json.dumps(event, allow_nan=False, ensure_ascii=False)
+    print("[adaptive] " + line)
+    with open(path, "a", encoding="utf-8") as output:
+        output.write(line + "\n")
+
+
 def training(dataset, opt, pipe, testing_iterations, visualize_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
     first_iter = 0
     if opt.spectral_pruning and (not 0 < opt.spectral_gamma or not 0 <= opt.spectral_weight):
@@ -127,6 +152,8 @@ def training(dataset, opt, pipe, testing_iterations, visualize_iterations, savin
             adaptive.load_state_dict(checkpoint_data[2])
         elif first_iter >= max(opt.densify_until_iter, opt.prune_from_iter):
             raise ValueError("Adaptive pruning cannot resume this checkpoint: scheduler state is missing")
+
+    adaptive_log = os.path.join(scene.model_path, "adaptive_trigger_log.jsonl")
 
     score_logger = None
     if opt.log_prune_scores:
@@ -247,22 +274,46 @@ def training(dataset, opt, pipe, testing_iterations, visualize_iterations, savin
             # --- Hard Pruning ---
             if adaptive:
                 if adaptive.should_check(iteration, gaussians.get_xyz.shape[0]):
-                    cameras = scene.getTrainCameras()
-                    current_loss = sum(l1_loss(render(view, gaussians, pipe, background)["render"],
-                                               view.original_image.cuda()).item()
-                                       for view in cameras) / len(cameras)
+                    current_loss, check_seconds = training_view_l1(scene, gaussians, pipe, background)
                     count = gaussians.get_xyz.shape[0]
+                    reason = adaptive.trigger_reason(iteration, current_loss)
                     ratio = adaptive.decide(iteration, count, current_loss)
-                    print("\n[ITER {}] adaptive L1={:.6f}, target={}, ratio={:.6f}".format(
-                        iteration, current_loss, adaptive.target, ratio))
+                    if adaptive.mode == "recover":
+                        log_adaptive_event(adaptive_log, dict(
+                            event="check", iteration=iteration, mode=adaptive.mode,
+                            current_loss=current_loss, last_pre_loss=adaptive.last_pre_loss,
+                            last_post_loss=adaptive.last_post_loss,
+                            wait_iterations=iteration - adaptive.last_iteration if adaptive.last_iteration is not None else 0,
+                            reason=reason, target=adaptive.target, count=count, planned_ratio=ratio,
+                            l1_wall_seconds=check_seconds,
+                            model_saved_before_prune=iteration in saving_iterations))
+                    else:
+                        print("\n[ITER {}] adaptive L1={:.6f}, target={}, ratio={:.6f}".format(
+                            iteration, current_loss, adaptive.target, ratio))
                     if ratio > 0:
                         prune_pkg = prune(scene, gaussians, pipe, background, ratio,
                                           iteration=iteration, stage="hard_adaptive", score_logger=score_logger,
                                           spectral_opt=opt if opt.spectral_pruning else None)
-                        adaptive.record_prune(iteration, current_loss)
+                        post_loss = None
+                        if adaptive.mode == "recover":
+                            post_loss, post_seconds = training_view_l1(scene, gaussians, pipe, background)
+                            count_after = gaussians.get_xyz.shape[0]
+                            log_adaptive_event(adaptive_log, dict(
+                                event="prune", iteration=iteration, mode=adaptive.mode, reason=reason,
+                                pre_loss=current_loss, post_loss=post_loss, count_before=count,
+                                count_after=count_after, removed=count - count_after,
+                                target=adaptive.target, planned_ratio=ratio, l1_wall_seconds=post_seconds,
+                                model_saved_before_prune=iteration in saving_iterations))
+                        adaptive.record_prune(iteration, current_loss, post_loss)
                         prune_time_min += prune_pkg['time_min']
                         prune_peak_memory_allocated = prune_pkg['peak_memory_allocated']
                         prune_peak_memory_reserved = prune_pkg['peak_memory_reserved']
+                if adaptive.mode == "recover" and iteration == opt.iterations:
+                    count = gaussians.get_xyz.shape[0]
+                    log_adaptive_event(adaptive_log, dict(
+                        event="training_end", iteration=iteration, mode=adaptive.mode,
+                        target=adaptive.target, count=count,
+                        target_reached=adaptive.target is not None and count <= adaptive.target))
             elif (iteration >= opt.densify_until_iter and iteration >= opt.prune_from_iter
                   and iteration < opt.prune_until_iter and iteration % opt.prune_interval == 0):
                 prune_pkg = prune(scene, gaussians, pipe, background,
