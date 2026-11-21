@@ -19,6 +19,15 @@ class AdaptiveTests(unittest.TestCase):
         self.assertGreater(s.decide(15500, 550, .095), 0)
         self.assertGreater(s.decide(17000, 550, .2), 0)
 
+    def test_trigger_reason_distinguishes_recovery_and_timeout(self):
+        s = scheduler()
+        self.assertEqual(s.trigger_reason(15000, .1), "initial")
+        s.record_prune(15000, .1)
+        self.assertIsNone(s.trigger_reason(15500, .096))
+        self.assertEqual(s.trigger_reason(15500, .095), "loss_recovered")
+        self.assertEqual(s.trigger_reason(17000, .096), "timeout")
+        self.assertEqual(s.trigger_reason(17000, .095), "loss_recovered")
+
     def test_unlimited_rounds_and_target(self):
         s = scheduler()
         s.decide(15000, 1000, .1)

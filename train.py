@@ -47,7 +47,7 @@ def score_func(view, gaussians, pipeline, background, scores):
     scores += img_scores.grad
 
 
-def prune(scene, gaussians, pipe, background, prune_ratio, *, iteration=None, stage=None, score_logger=None):
+def prune(scene, gaussians, pipe, background, prune_ratio, *, iteration=None, stage=None, score_logger=None, trigger_details=None):
 
     iter_start = torch.cuda.Event(enable_timing = True)
     iter_end = torch.cuda.Event(enable_timing = True)
@@ -92,6 +92,8 @@ def prune(scene, gaussians, pipe, background, prune_ratio, *, iteration=None, st
                        score_shape=score_shape, score_dtype=score_dtype, n_before=n_before, n_after=n_after,
                        requested_ratio=prune_ratio, prune_cuda_time_ms=time_ms,
                        prune_peak_allocated_mib=peak_memory_allocated, prune_peak_reserved_mib=peak_memory_reserved)
+        if trigger_details is not None:
+            context.update(trigger_details)
         score_logger.record(score_array, context, copy_ms)
 
     return {
@@ -243,8 +245,16 @@ def training(dataset, opt, pipe, testing_iterations, visualize_iterations, savin
                     print("\n[ITER {}] adaptive L1={:.6f}, target={}, ratio={:.6f}".format(
                         iteration, current_loss, adaptive.target, ratio))
                     if ratio > 0:
+                        trigger_details = dict(
+                            trigger_reason=adaptive.trigger_reason(iteration, current_loss),
+                            current_l1=current_loss,
+                            previous_pre_prune_l1=adaptive.last_loss,
+                            l1_threshold=adaptive.beta * adaptive.last_loss if adaptive.round else None,
+                            wait_iterations=iteration - adaptive.last_iteration if adaptive.round else None,
+                        )
                         prune_pkg = prune(scene, gaussians, pipe, background, ratio,
-                                          iteration=iteration, stage="hard_adaptive", score_logger=score_logger)
+                                          iteration=iteration, stage="hard_adaptive", score_logger=score_logger,
+                                          trigger_details=trigger_details)
                         adaptive.record_prune(iteration, current_loss)
                         prune_time_min += prune_pkg['time_min']
                         prune_peak_memory_allocated = prune_pkg['peak_memory_allocated']
