@@ -112,11 +112,8 @@ def training(dataset, opt, pipe, testing_iterations, visualize_iterations, savin
         gaussians.restore(model_params, opt)
 
     adaptive = AdaptivePruning(opt) if opt.adaptive_hard_pruning else None
-    if adaptive and checkpoint:
-        if len(checkpoint_data) >= 3 and checkpoint_data[2] is not None:
-            adaptive.load_state_dict(checkpoint_data[2])
-        elif first_iter >= max(opt.densify_until_iter, opt.prune_from_iter):
-            raise ValueError("Adaptive pruning cannot resume this checkpoint: scheduler state is missing")
+    if adaptive and checkpoint and first_iter >= adaptive.start:
+        raise ValueError("Cannot resume adaptive hard pruning after its start iteration")
 
     score_logger = None
     if opt.log_prune_scores:
@@ -230,7 +227,7 @@ def training(dataset, opt, pipe, testing_iterations, visualize_iterations, savin
                 gaussians.optimizer.step()
                 gaussians.optimizer.zero_grad(set_to_none = True)
 
-            if (iteration in checkpoint_iterations) and not adaptive:
+            if iteration in checkpoint_iterations:
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
 
@@ -260,11 +257,6 @@ def training(dataset, opt, pipe, testing_iterations, visualize_iterations, savin
                 prune_time_min += prune_pkg['time_min']
                 prune_peak_memory_allocated = prune_pkg['peak_memory_allocated']
                 prune_peak_memory_reserved = prune_pkg['peak_memory_reserved']
-
-            if adaptive and iteration in checkpoint_iterations:
-                print("\n[ITER {}] Saving Checkpoint".format(iteration))
-                torch.save((gaussians.capture(), iteration, adaptive.state_dict()),
-                           scene.model_path + "/chkpnt" + str(iteration) + ".pth")
 
             # Log and save
             iter_time = iter_start.elapsed_time(iter_end)

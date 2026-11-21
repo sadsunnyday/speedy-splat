@@ -10,7 +10,7 @@ def scheduler():
 
 
 class AdaptiveTests(unittest.TestCase):
-    def test_trigger_budget_and_resume(self):
+    def test_trigger_and_budget(self):
         s = scheduler()
         self.assertTrue(s.should_check(15000, 1000))
         self.assertAlmostEqual(s.decide(15000, 1000, .1), .45)
@@ -18,10 +18,6 @@ class AdaptiveTests(unittest.TestCase):
         self.assertEqual(s.decide(15500, 550, .096), 0)
         self.assertGreater(s.decide(15500, 550, .095), 0)
         self.assertGreater(s.decide(17000, 550, .2), 0)
-        restored = scheduler()
-        restored.load_state_dict(s.state_dict())
-        self.assertEqual(restored.state_dict(), s.state_dict())
-        self.assertEqual(restored.decide(15500, 550, .096), 0)
 
     def test_unlimited_rounds_and_target(self):
         s = scheduler()

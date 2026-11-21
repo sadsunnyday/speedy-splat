@@ -42,14 +42,3 @@ class AdaptivePruning:
         self.last_iteration = iteration
         self.last_loss = loss
         self.round += 1
-
-    def state_dict(self):
-        return dict(target=self.target, budget=self.budget, last_iteration=self.last_iteration,
-                    last_loss=self.last_loss, round=self.round,
-                    config=(self.start, self.stop, self.interval, self.max_wait, self.beta, self.fraction))
-
-    def load_state_dict(self, state):
-        if tuple(state['config']) != (self.start, self.stop, self.interval, self.max_wait, self.beta, self.fraction):
-            raise ValueError('Adaptive pruning configuration differs from checkpoint')
-        for key in ('target', 'budget', 'last_iteration', 'last_loss', 'round'):
-            setattr(self, key, state[key])
