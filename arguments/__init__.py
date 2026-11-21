@@ -35,8 +35,7 @@ class ParamGroup:
                 if t == bool:
                     group.add_argument("--" + key, default=value, action="store_true")
                 else:
-                    group.add_argument("--" + key, default=value, type=t,
-                                       **({"choices": ("legacy", "recover")} if key == "adaptive_trigger_mode" else {}))
+                    group.add_argument("--" + key, default=value, type=t)
 
     def extract(self, args):
         group = GroupParams()
@@ -96,7 +95,6 @@ class OptimizationParams(ParamGroup):
         self.after_densify_prune_ratio = 0.30
         self.log_prune_scores = False
         self.adaptive_hard_pruning = False
-        self.adaptive_trigger_mode = "legacy"
         self.adaptive_beta = 0.95
         self.adaptive_check_interval = 500
         self.adaptive_max_wait = 2000
