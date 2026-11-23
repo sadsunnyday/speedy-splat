@@ -10,6 +10,7 @@
 #
 
 import os
+import math
 import time
 import torch
 from random import randint
@@ -101,6 +102,13 @@ def prune(scene, gaussians, pipe, background, prune_ratio, *, iteration=None, st
         "peak_memory_reserved" : peak_memory_reserved,
         "time_min" : time_min
     }
+
+@torch.no_grad()
+def training_view_l1(cameras, gaussians, pipe, background):
+    return sum(l1_loss(render(view, gaussians, pipe, background)["render"],
+                       view.original_image.cuda()).item()
+               for view in cameras) / len(cameras)
+
 
 def training(dataset, opt, pipe, testing_iterations, visualize_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
     first_iter = 0
@@ -237,16 +245,25 @@ def training(dataset, opt, pipe, testing_iterations, visualize_iterations, savin
             if adaptive:
                 if adaptive.should_check(iteration, gaussians.get_xyz.shape[0]):
                     cameras = scene.getTrainCameras()
-                    current_loss = sum(l1_loss(render(view, gaussians, pipe, background)["render"],
-                                               view.original_image.cuda()).item()
-                                       for view in cameras) / len(cameras)
+                    current_loss = training_view_l1(cameras, gaussians, pipe, background)
                     count = gaussians.get_xyz.shape[0]
                     ratio = adaptive.decide(iteration, count, current_loss)
                     print("\n[ITER {}] adaptive L1={:.6f}, target={}, ratio={:.6f}".format(
                         iteration, current_loss, adaptive.target, ratio))
+                    logging_recovery = score_logger is not None and score_logger.enabled
+                    reason = adaptive.trigger_reason(iteration, current_loss) if ratio > 0 else "wait"
+                    if logging_recovery and adaptive.last_iteration is not None:
+                        score_logger.record_recovery(dict(
+                            event="recovery_check", iteration=iteration,
+                            prune_iteration=adaptive.last_iteration,
+                            elapsed_iterations=iteration - adaptive.last_iteration,
+                            l1=current_loss, pre_prune_l1=adaptive.last_loss,
+                            l1_threshold=adaptive.beta * adaptive.last_loss,
+                            decision=reason,
+                        ))
                     if ratio > 0:
                         trigger_details = dict(
-                            trigger_reason=adaptive.trigger_reason(iteration, current_loss),
+                            trigger_reason=reason,
                             current_l1=current_loss,
                             previous_pre_prune_l1=adaptive.last_loss,
                             l1_threshold=adaptive.beta * adaptive.last_loss if adaptive.round else None,
@@ -255,6 +272,15 @@ def training(dataset, opt, pipe, testing_iterations, visualize_iterations, savin
                         prune_pkg = prune(scene, gaussians, pipe, background, ratio,
                                           iteration=iteration, stage="hard_adaptive", score_logger=score_logger,
                                           trigger_details=trigger_details)
+                        if score_logger is not None and score_logger.enabled:
+                            post_l1 = training_view_l1(cameras, gaussians, pipe, background)
+                            score_logger.record_recovery(dict(
+                                event="prune", iteration=iteration, prune_iteration=iteration,
+                                elapsed_iterations=0, pre_prune_l1=current_loss,
+                                post_prune_l1=post_l1 if math.isfinite(post_l1) else None,
+                                post_prune_l1_finite=math.isfinite(post_l1),
+                                l1_threshold=adaptive.beta * current_loss, decision=reason,
+                            ))
                         adaptive.record_prune(iteration, current_loss)
                         prune_time_min += prune_pkg['time_min']
                         prune_peak_memory_allocated = prune_pkg['peak_memory_allocated']

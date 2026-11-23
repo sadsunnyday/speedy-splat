@@ -78,6 +78,20 @@ class LoggerTests(unittest.TestCase):
             self.assertEqual(rows[0]['run_id'], a.run_id)
             self.assertTrue(os.path.exists(os.path.join(b.output_dir, 'metadata.json')))
 
+    def test_recovery_events_keep_wait_checks_and_link_rounds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            logger = PruneScoreLogger.create(tmp, {})
+            logger.record_recovery(dict(event='prune', iteration=15000, prune_iteration=15000,
+                                        pre_prune_l1=.015, post_prune_l1=.018))
+            logger.record_recovery(dict(event='recovery_check', iteration=15500,
+                                        prune_iteration=15000, l1=.0165, decision='wait'))
+            with open(os.path.join(logger.output_dir, 'recovery.jsonl'), encoding='utf-8') as f:
+                prune, check = map(json.loads, f)
+            self.assertEqual(prune['prune_iteration'], check['prune_iteration'])
+            self.assertEqual(check['decision'], 'wait')
+            self.assertEqual(check['run_id'], logger.run_id)
+            self.assertFalse(os.path.exists(os.path.join(logger.output_dir, 'rounds.jsonl')))
+
     def test_io_failures(self):
         with tempfile.TemporaryDirectory() as tmp:
             logger = PruneScoreLogger.create(tmp, {})

@@ -159,15 +159,22 @@ class PruneScoreLogger:
         data.update(stats)
         if 'threshold_count_mismatch' in stats['issues']:
             print('Warning: prune threshold count mismatch at iteration {}'.format(context.get('iteration')), file=sys.stderr)
+        self._append('rounds.jsonl', data)
+
+    def record_recovery(self, context):
+        if self.enabled:
+            self._append('recovery.jsonl', dict(context, schema_version=1, run_id=self.run_id))
+
+    def _append(self, filename, data):
         line = json.dumps(data, ensure_ascii=False, allow_nan=False, default=_json_default) + '\n'
-        path = os.path.join(self.output_dir, 'rounds.jsonl')
+        path = os.path.join(self.output_dir, filename)
         try:
             with open(path, 'a', encoding='utf-8') as handle:
                 handle.write(line)
                 handle.flush()
         except OSError as exc:
             self.enabled = False
-            print('Warning: prune score logging failed at {} iteration {}: {}; logs incomplete and disabled'.format(path, context.get('iteration'), exc), file=sys.stderr)
+            print('Warning: prune score logging failed at {} iteration {}: {}; logs incomplete and disabled'.format(path, data.get('iteration'), exc), file=sys.stderr)
 
 
 def _json_default(value):
