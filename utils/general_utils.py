@@ -109,7 +109,15 @@ def build_scaling_rotation(s, r):
     L = R @ L
     return L
 
-def safe_state(silent):
+def validate_seed(seed):
+    """Validate a Python integer seed accepted by NumPy's legacy RNG."""
+    if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed <= 2**32 - 1:
+        raise ValueError("seed must be an integer between 0 and 4294967295")
+    return seed
+
+
+def safe_state(silent, seed=0):
+    validate_seed(seed)
     old_f = sys.stdout
     class F:
         def __init__(self, silent):
@@ -127,7 +135,7 @@ def safe_state(silent):
 
     sys.stdout = F(silent)
 
-    random.seed(0)
-    np.random.seed(0)
-    torch.manual_seed(0)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
     torch.cuda.set_device(torch.device("cuda:0"))

@@ -109,7 +109,7 @@ def collect_metadata(dataset, opt, pipe, checkpoint, resume_iteration, cameras, 
         sizes[key] = sizes.get(key, 0) + 1
     return dict(model_path=dataset.model_path, source_path=dataset.source_path, checkpoint=checkpoint,
                 resume_iteration=resume_iteration, model_params=vars(dataset), optimization_params=vars(opt),
-                pipeline_params=vars(pipe), seed=0, python_version=sys.version, numpy_version=np.__version__,
+                pipeline_params=vars(pipe), seed=opt.seed, python_version=sys.version, numpy_version=np.__version__,
                 pytorch_version=str(torch.__version__), cuda_version=torch.version.cuda,
                 gpu_name=torch.cuda.get_device_name(), train_view_count=len(cameras),
                 image_sizes=[dict(width=k[0], height=k[1], count=v) for k, v in sorted(sizes.items())],
